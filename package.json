@@ -1,0 +1,21 @@
+{
+  "name": "fn-hpug",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "pug-lexer": "^5.0.1",
+    "pug-parser": "^6.0.0"
+  },
+  "devDependencies": {
+    "htm": "^3.0.4",
+    "uhtml": "^2.6.0"
+  }
+}
