@@ -320,3 +320,12 @@ export class HyperPug {
     }
   }
 }
+
+export function compile(source, params) {
+  const { target } = new HyperPug({ ...source, params })
+
+  return target
+}
+
+
+export default compile
