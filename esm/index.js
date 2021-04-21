@@ -1,90 +1,66 @@
 import lexer from 'pug-lexer'
 import parse from 'pug-parser'
 
-const UNQUOTE = /((^')|('$))/g
 
-function unquote(string) {
-  return string.replace(UNQUOTE, '"')
+import { Parser } from 'acorn'
+import { BlockNode } from './block-node.js'
+import { MixinNode } from './mixin-node.js'
+import { RootNode } from './root-node.js'
+import { EachNode } from './each-node.js'
+import { ConditionNode } from './condition-node.js'
+
+export { Parser }
+
+const replace = {
+  "'": '&#39;',
+  '"': '&quot;'
 }
 
-function $(code) {
-  return `\${${code}}`
+function escapeAttr(text) {
+  return text.replace(/['"]/g, c => replace[c])
 }
 
-const EVENT_FORMATS = {
-  on(event) {
-    return `on${event.toLowerCase()}`
-  },
-  onUpper(event) {
-    return `on${upperFirst(event)}`
-  },
-  at(event) {
-    return `@${event}`
-  },
-  parans(event) {
-    return `(${event})`
-  }
+const OUTPUT_OPTIONS = {
+  if: '$test ? $consequent : $alternate',
+  else: 'null',
+  events: 'on$name',
+  properties: '.$name',
+  functions: 'function $name($args){$code\nreturn $child}',
+  modules: '$imports\nexport default $function',
+  mixins: '$mixin({$props}, $children)',
+  bindings: 'oninput',
+  each: `Object.entries($object).map(([$key, $value]) => {$code\n return $child})`
 }
 
-const PROPERTY_FORMATS = {
-  dot(property) {
-    return `.${property}`
-  },
-  plain(property) {
-    return property
-  },
-  colon(property) {
-    return `:${property}`
-  },
-  bracket(property) {
-    return `[${property}]`
-  }
+function applyDefaults(options) {
+  return { ...OUTPUT_OPTIONS, ...options }
 }
 
-function transformers({ events, properties, each }) {
-  if(typeof events !== 'function') {
-    events = EVENT_FORMATS[events] || EVENT_FORMATS.on
-  }
-  if(properties !== 'functions') {
-    properties = PROPERTY_FORMATS[properties] || PROPERTY_FORMATS.dot
-  }
-
-  return { events, properties, each }
-}
-
+const EVENT = /^(?:[@(]|on)([\S]+?)[)]?$/
+const PROPERTY = /^(?:[.\[])([\S]+?)[\]]?$/
 export class HyperPug {
   constructor({ 
     source = '',
     tag = 'html',
-    filename = 'template.pug',
+    name = 'template',
+    filename = `${name}.pug`,
     lexOptions = {},
-    inputOptions = {
-      events: /^(?:(?:@|on)(.*))|[(]([^)]+)[)]$/,
-      properties: /^(?:\.(.*))|\[([^\]]+)\]$/,
-    },
-    outputOptions = {
-      events: 'on',
-      properties: 'dot',
-      each(block, object, args) {
-        return `Array.from(${object}, (${args}) => ${block})`
-      }
-    },
     parseOptions = {},
+    outputOptions = OUTPUT_OPTIONS,
     ast = parse(lexer(source, { filename, ...lexOptions }), {
       filename: filename,
       ...parseOptions,
     })
   }) {
     this.tag = tag
+    this.name = name
+    this.outputOptions = applyDefaults(outputOptions)
     this.pugAst = ast
-    this.inputOptions = inputOptions
-    this.transform = transformers(outputOptions)
-    this.blockStart = 0
+    this.target = new RootNode(this)
     this.context = []
-    this.result = [tag, '`']
+    this.buffer = ''
     this.visit(ast)
-    this.result.push('`')
-    this.code = this.result.join('')
+    this.target.quasis.push(this.buffer)
   }
   visit(ast) {
     const visitor = `visit${ast.type}`
@@ -96,8 +72,33 @@ export class HyperPug {
     this[visitor](ast)
   }
 
+  addExpression(expression, after = '') {
+    this.target.quasis.push(this.buffer)
+    this.target.expressions.push(expression)
+    this.buffer = after
+  }
+
+  addBlock(node, block, pop = true) {
+    if(!block) return
+
+    this.target.expressions.push(node)
+    this.target.quasis.push(this.buffer)
+    this.buffer = ''
+
+    this.context.push(this.target)
+
+    this.target = node
+    this.visitBlock(block)
+    this.target.quasis.push(this.buffer)
+    this.buffer = ''
+    
+    if(pop) {
+      this.target = this.context.pop()
+    }
+  }
+
   visitDoctype(node) {
-    this.result.push(`<!DOCTYPE ${node.val}>`)
+    this.buffer += `<!DOCTYPE ${node.val}>`
   }
   
   visitBlock(block) {
@@ -106,99 +107,216 @@ export class HyperPug {
     }
   }
 
-  isEvent(event) {
-    return this.inputOptions.events.test(event)
+  visitRawInclude(include) {
+    const root = this.context[0] || this.target
+    const { path } = include.file
+    const id = this.includes || 1
+
+    this.includes = id + 1
+    const expression = `__include$${id}`
+
+    root.module.unshift(`import ${expression} from ${JSON.stringify(path)}`)
+    this.addExpression(expression)
   }
 
-  isProperty(event) {
-    return this.inputOptions.properties.test(event)
+  getProp(prop) {
+    const { properties: format } = this.outputOptions
+
+    if(typeof format === 'function') {
+      return format(prop)
+    }
+
+    return format.replace(/[$]name/g, prop)
   }
 
-  visitEvent(attr, val, mustEscape) {
-    const match = this.inputOptions.events.exec(attr)
-    const event = match[1] || match[2]
-    const name = this.transform.events(event)
+  getEvent(name) {
+    const { events: format } = this.outputOptions
 
-    this.result.push(` ${name}=${$(`e => ${val}`)}`)
+    if(typeof format === 'function') {
+      return format(name)
+    }
+    return format.replace(/[$]name/g, name)
   }
 
-  visitProperty(attr, val, mustEscape) {
-    const match = this.inputOptions.properties.exec(attr)
-    const prop = match[1] || match[2]
-    const name = this.transform.properties(prop)
+  getBinding(name) {
+    const { bindings: format } = this.outputOptions
 
-    this.result.push(` ${name}=${$(val)}`)
+    const event = this.getEvent(name)
+    
+    if(typeof postfix === 'function') {
+      return format(event, name)
+    }
+
+    return format.replace(/[$]name/g, event)
+  }
+
+  normalizeAttributes(tag) {
+    let match = null
+
+    const { outputOptions } = this
+    const { wrapEvents = true } = outputOptions
+
+    for(const attr of tag.attrs) {
+      const { val, name } = attr
+
+      attr.originalName = name
+      if(match = EVENT.exec(name)) {
+        attr.val = wrapEvents ? `e => ${val}` : val
+        attr.name = this.getEvent(match[1])
+        attr.code = true
+      } else if(match = PROPERTY.exec(name)) {
+        let binding = EVENT.exec(match[1])
+
+        attr.code = true
+
+        if(binding) {
+          attr.name = this.getProp(binding[1])
+
+          const name = binding[1]
+          const prop = val
+
+          const expr = `${prop} = e.target.${name}`
+          const event = this.getBinding(binding[1])
+            
+          tag.attrs.push({
+            name: event,
+            code: true,
+            val: wrapEvents ? expr : `e => ${expr}`
+          })
+        } else {
+          attr.name = this.getProp(match[1])
+        }
+      } else if(name[0] === ':') {
+        const prop = name.slice(1)
+        const expr = `${val} = e.target.${prop}`
+        attr.code = true
+        attr.name = this.getProp(prop)
+      
+        tag.attrs.push({
+          code: true,
+          name: this.getEvent('input'),
+          val: wrapEvents ? expr : `e => ${expr}`
+        })
+      } else if(val[0] === '"' || val[0] === "'") {
+        try {
+          let value = JSON.parse(val.replace(/(^')|('$)/g, '"'))
+          
+          if(attr.mustEscape) {
+            value = escapeAttr(value)
+          } 
+
+          attr.val = value
+        } catch {
+          attr.code = true
+        }
+      } else if(val != null) {
+        attr.code = true
+      }
+    }
+
   }
 
   visitAttributes(tag) {
-    for(const { name, val, mustEscape } of tag.attrs) {
-      if(this.isEvent(name)) {
-        this.visitEvent(name, val, mustEscape)
-      } else if(this.isProperty(name)) {
-        this.visitProperty(name, val, mustEscape)
-      } else if(val === true) {
-        this.result.push(` ${name}`)
-      } else if(val !== false) {
-        this.result.push(` ${name}=${mustEscape  ? $(val) : unquote(val)}`)
+    this.normalizeAttributes(tag)
+
+    for(const attr of tag.attrs) {
+      this.buffer += ' ' + attr.name
+      if(attr.val === true) continue
+      this.buffer += '='
+      if(attr.code) {
+        this.addExpression(attr.val)
+      } else {
+        this.buffer += '"' + attr.val + '"'
       }
-    }
-  }
-
-  visitTag(tag) {
-    this.result.push(`<${tag.name}`)
-
-    this.visitAttributes(tag)
-
-    if(tag.selfClosing) {
-      this.result.push('/>')
-    } else {
-      this.result.push('>')
-    }
-
-    this.visit(tag.block)
-
-    if(!tag.selfClosing) {
-      this.result.push(`</${tag.name}>`)
     }
   }
 
   visitText(text) {
-    this.result.push(text.val)
+    this.buffer += text.val
   }
-  
+
   visitCode(code) {
     if(code.buffer) {
-      this.result.push($(code.val))
+      this.addExpression(code.val)
     } else {
-      if(!this.isBlock) {
-        this.result.splice(this.blockStart, 0, 'return ')
-        this.isBlock = true
+      this.target.code.push(code.val)
+    }
+  }
+
+  visitTag(tag) {
+    const { name } = tag
+
+    this.buffer += `<${name}`
+
+    if(tag.attrs && tag.attrs.length) {
+      this.visitAttributes(tag)
+    }
+
+    if(tag.selfClosing) {
+      this.buffer += '/>'
+    } else {
+      this.buffer += '>'
+      if(tag.block) {
+        this.visitBlock(tag.block)
       }
-      this.result.splice(this.blockStart, 0, `${code.val};`)
-      this.blockStart += 1
+      this.buffer += `</${name}>`
     }
   }
 
   visitEach(each) {
-    const { result } = this
+    this.addBlock(new EachNode(this, each), each.block)
+  }
+
+  visitConditional(condition) {
+    const { test } = condition
+
+    const alternate = condition.alternate ? new BlockNode(this) : null
+    const consequent = new ConditionNode(this, { test, alternate })
+
+    this.addBlock(consequent, condition.consequent, false)
     
-    this.result = [this.tag, '`']
+    if(alternate) {
+      this.target = alternate
+      this.visitBlock(condition.alternate)
+      this.target.quasis.push(this.buffer)
+      this.buffer = ''
+    }
 
-    this.isBlock = false
-    this.blockStart = 0
+    this.target = this.context.pop()
+  }
 
-    this.visit(each.block)
+  visitMixinDefinition(mixin) {
+    const root = this.context[0] || this.target
+    const node = new MixinNode(this, mixin)
 
-    this.result.push('`')
+    const { target, buffer } = this
 
-    let block = this.result.join('')
+    this.target = node
+    this.buffer = ''
 
-    if(this.isBlock) block = `{${block}}`
+    this.visitBlock(mixin.block)
 
-    const args = [ each.val ]
-    if(each.key) args.push(each.key)
-    const code = this.transform.each(block, each.obj, args)
-    this.result = result
-    this.result.push($(code))
+    this.target.quasis.push(this.buffer)
+
+    root.code.push(node)
+
+    this.target = target
+    this.buffer = buffer
+  }
+
+  visitMixin(mixin) {
+    if(!mixin.call) {
+      return this.visitMixinDefinition(mixin)
+    }
+
+    this.normalizeAttributes(mixin)
+
+    const { name, attrs } = mixin    
+
+    if(mixin.block) {
+      this.addBlock(new MixinNode(this, { name, attrs }), mixin.block)
+    } else {
+      this.addExpression(new MixinNode(this, { name, attrs }))
+    }
   }
 }

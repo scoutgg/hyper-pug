@@ -1,97 +1,84 @@
+// import htm from 'htm'
 import { html, render } from 'uhtml'
 import { HyperPug } from '../esm/index.js'
 
-// import htm from 'htm'
 
-// function h(tagName, attributes, children) {
-//   const element = document.createElement(tagName)
-//   for(const [ attr, val ] of Object.entries(attributes || {})) {
-//     element.setAttribute(attr, val)
-//   }
-
-//   if(Array.isArray(children)) {
-//     for(const child of children) {
-//       element.append(child)
-//     }
-//   } else {
-//     element.append(children)
-//   }
-
-
-//   return element
-// }
+function h(tagName, properties, ...children) {
+  return { tagName, properties, children: children.flat(Infinity) }
+}
 
 // const html = htm.bind(h)
 
-function pug(strings, ...args) {
-  const source = String.raw(strings, ...args)
-  const { code } = new HyperPug({
-    source: source,
-    outputOptions: {
-      each(block, object, args) {
-        return `Object.entries(${object}).map(([${args.reverse()}]) => ${block})`
-      }
-    }
-  })
-
-  console.log(code)
-
-  let create = null
-
-  return function context(context) {
-    if(!create) {
-      create = Function(['html',`{${Object.keys(context)}}`], `return ${code}`)
-    }
-    
-    return create(html, context)
+const posts = globalThis.posts = [
+  {
+    title: 'Hello world',
+    slug: 'hello-world',
+    content: 'This is some content',
+    author: 'fireneslo'
   }
-}
+]
 
+const cache = new WeakMap
 
-const template = pug`
-static hello
-h1#identity.class-name(attr=value+'stuff', flag)
-  | Hello
-ul((click)=console.log(e), [model]={"neat": "stuff"})
-  each item, index in thing
-    - var neat = item.thing
-    li(
-      data-index=index,
-      .item=item,
-      @click=console.log(e.target.item)
-    )= neat
-`
+function pug(statics, ...values) {
+  const self = this || globalThis
 
-setTimeout(loop)
-
-let value = 0
-let thing = []
-
-let range = null
-
-function loop(params) {
-  const nodes = template({
-    value: value++,
-    thing: thing = thing.concat([ { thing: 'neat' } ])
+  if(cache.has(statics)) {
+    return cache.get(statics).apply(self, values)
+  }
+  
+  const args = Array.from(values, (_, i) =>`_${i}`)
+  const source = String.raw(statics, ...args)
+  const { target } = new HyperPug({
+    source,
+    outputOptions: {
+      mixins: 'html `<${$mixin} $attrs>$content<//>`'
+    }
   })
+  const code = target.asFunction({arguments: `${args}` })
 
-  render(document.body, nodes)
+  const template = Function(['html'], 'return ' + code)(html)
 
-  // let start = nodes[0]
-  // let end = nodes[nodes.length - 1]
+  cache.set(statics, template)
 
-  // if(range) {
-  //   range.deleteContents()
-  // }
+  console.log(template)
 
-  // for(const node of nodes) {
-  //   document.body.append(node)
-  // }
-
-  // range = document.createRange()
-  // range.setStartBefore(start)
-  // range.setEndAfter(end)
-
-  return setTimeout(loop, 1000)
+  return template.apply(self, values)
 }
+
+;(function apply(iteration = 0) {
+  const source = pug`
+- let index = ${iteration}
+- let render = ${apply}
+mixin Author({ name='' }, children)
+  i= name
+  = children
+
+main
+  h1 count #{index}
+  
+  button(@click=render(++index)) Increment
+
+  input(:value=this.contents, @blur=render())
+
+  p= this.contents
+
+  if index % 2
+    - var cool = 'neat'
+    b Odd
+  else 
+    b: i Even
+  each post in ${posts}
+    - let { title, author, content, slug } = post
+    article.post
+      a(href="/posts/"+slug)
+        h2= title
+      p= content
+      +Author(name=author)
+        h1 extra
+
+`
+  // console.log(source)
+  console.log(render(document.body, source))  
+}())
 
